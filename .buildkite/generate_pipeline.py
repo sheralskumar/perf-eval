@@ -8,9 +8,10 @@ Always emits one GPU-profiled step per selected workload. Selection rules:
   Otherwise               → run every workload with ``nightly: true``
 
 Override env vars are propagated to each step:
-  VLLM_IMAGE   full docker image URI; overrides workload's vllm.image
-  VLLM_COMMIT  commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
-  BENCH_ONLY   when truthy, run vllm bench configs and skip lm_eval tasks
+  VLLM_IMAGE       full docker image URI; overrides workload's vllm.image
+  VLLM_IMAGE_ROCM  AMD alias for VLLM_IMAGE when VLLM_IMAGE is unset
+  VLLM_COMMIT      commit SHA → vllm/vllm-openai:nightly-<sha> (Docker Hub)
+  BENCH_ONLY       when truthy, run vllm bench configs and skip lm_eval tasks
 
 Workloads can also set ``bench_only: true`` to apply BENCH_ONLY to that step
 without forcing the whole build to skip lm_eval.
@@ -71,9 +72,22 @@ ECR_PULL_THROUGH_CACHE = (
 
 
 def ecr_pull_through(image):
-    """Rewrite public ECR URLs to the private pull-through cache."""
+    """Rewrite public ECR URLs to the private pull-through cache.
+
+    NVIDIA clusters authenticate to the pull-through cache via
+    ``k8s-ecr-login-renew-docker-secret``. AMD ROCm clusters only have Docker Hub
+    creds, so they pull public ECR directly (see ``k8s_image``).
+    """
     if image.startswith(ECR_PUBLIC_PREFIX):
         return ECR_PULL_THROUGH_CACHE + image[len(ECR_PUBLIC_PREFIX):]
+    return image
+
+
+def k8s_image(data, profile, k8s_plugin_kind):
+    """Resolve the container image for a native k8s step."""
+    image = resolved_image(data, profile)
+    if k8s_plugin_kind == "nvidia":
+        return ecr_pull_through(image)
     return image
 
 
@@ -97,6 +111,8 @@ def resolved_image(data, profile):
     override_image = (os.environ.get("VLLM_IMAGE") or "").strip()
     override_commit = (os.environ.get("VLLM_COMMIT") or "").strip()
     custom_repo = (profile.get("image_repo") or "").strip()
+    if not override_image and custom_repo:
+        override_image = (os.environ.get("VLLM_IMAGE_ROCM") or "").strip()
     repo = custom_repo or DEFAULT_IMAGE_REPO
     # Don't use VLLM_IMAGE for AMD workloads unless it is a ROCm image
     if override_image and (not custom_repo or "rocm" in override_image.lower()):
@@ -292,11 +308,11 @@ def make_step(path, data, profiles):
         builder = K8S_PLUGINS.get(kind)
         if builder is None:
             sys.exit(f"{path}: unknown k8s_plugin {kind!r} (have {', '.join(K8S_PLUGINS)})")
-        image = ecr_pull_through(resolved_image(data, profile))
+        image = k8s_image(data, profile, kind)
         step["plugins"] = [builder(image, data.get("num_gpus", 1), profile, gpu)]
     step_env = {
         k: os.environ[k]
-        for k in ("VLLM_IMAGE", "VLLM_COMMIT", "BENCH_ONLY")
+        for k in ("VLLM_IMAGE", "VLLM_IMAGE_ROCM", "VLLM_COMMIT", "BENCH_ONLY")
         if os.environ.get(k)
     }
     if bench_only and "BENCH_ONLY" not in step_env:

@@ -107,6 +107,61 @@ def test_run_command_fetches_ingest_token_before_workload():
     assert command.index(get_secret) < command.index("./lib/run.sh")
 
 
+def test_amd_public_ecr_image_not_pull_through_rewritten():
+    key = "VLLM_IMAGE"
+    prev = os.environ.get(key)
+    ecr = "public.ecr.aws/q9t5s3a7/vllm-release-repo:abc123-rocm"
+    os.environ[key] = ecr
+    try:
+        profile = {"image_repo": "vllm/vllm-openai-rocm"}
+        assert g.k8s_image({}, profile, "amd") == ecr
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
+
+
+def test_nvidia_public_ecr_image_uses_pull_through_cache():
+    key = "VLLM_IMAGE"
+    prev = os.environ.get(key)
+    ecr = "public.ecr.aws/q9t5s3a7/vllm-release-repo:abc123-x86_64"
+    os.environ[key] = ecr
+    expected = (
+        g.ECR_PULL_THROUGH_CACHE + "q9t5s3a7/vllm-release-repo:abc123-x86_64"
+    )
+    try:
+        assert g.k8s_image({}, {}, "nvidia") == expected
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
+
+
+def test_vllm_image_rocm_used_when_vllm_image_unset():
+    key_image = "VLLM_IMAGE"
+    key_rocm = "VLLM_IMAGE_ROCM"
+    prev_image = os.environ.get(key_image)
+    prev_rocm = os.environ.get(key_rocm)
+    os.environ.pop(key_image, None)
+    os.environ[key_rocm] = (
+        "public.ecr.aws/q9t5s3a7/vllm-release-repo:aa9903490c616dc6871e5acc62cec7bb1e5e9434-rocm"
+    )
+    try:
+        profile = {"image_repo": "vllm/vllm-openai-rocm"}
+        assert g.resolved_image({}, profile) == os.environ[key_rocm]
+    finally:
+        if prev_image is None:
+            os.environ.pop(key_image, None)
+        else:
+            os.environ[key_image] = prev_image
+        if prev_rocm is None:
+            os.environ.pop(key_rocm, None)
+        else:
+            os.environ[key_rocm] = prev_rocm
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
